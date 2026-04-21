@@ -1,0 +1,11 @@
+
+oacts = list()
+oacts.append([       0x0,    0x64000,  4,         63,          0, 'Conv2d_45'])
+oacts.append([   0x64000,    0x64000,  4,         64,          0, 'Conv2d_43'])
+oacts.append([   0xc8000,    0x32000,  4,          1,          0, 'Conv2d_44'])
+oacts.append([   0xfa000,    0x19000,  4,         63,          0, 'Conv2d_59'])
+oacts.append([  0x113000,    0x19000,  4,         64,          0, 'Conv2d_57'])
+oacts.append([  0x12c000,     0xc800,  4,          1,          0, 'Conv2d_58'])
+oacts.append([  0x138800,     0x6400,  4,         63,          0, 'Conv2d_71'])
+oacts.append([  0x13ec00,     0x6400,  4,         64,          0, 'Conv2d_69'])
+oacts.append([  0x145000,     0x3200,  4,          1,          0, 'Conv2d_70'])
