@@ -39,6 +39,24 @@ class PostProcessor(QThread):
 		self.__frameWidth = frameWidth
 		self.__frameHeight = frameHeight
 
+		# 21개 손 keypoint 스켈레톤 연결 정의 (MediaPipe Hand landmark 기준)
+		# 0=손목, 1-4=엄지, 5-8=검지, 9-12=중지, 13-16=약지, 17-20=소지
+		self.HAND_SKELETON = [
+			# 손바닥
+			(0, 1), (0, 5), (0, 9), (0, 13), (0, 17),
+			(5, 9), (9, 13), (13, 17),
+			# 엄지
+			(1, 2), (2, 3), (3, 4),
+			# 검지
+			(5, 6), (6, 7), (7, 8),
+			# 중지
+			(9, 10), (10, 11), (11, 12),
+			# 약지
+			(13, 14), (14, 15), (15, 16),
+			# 소지
+			(17, 18), (18, 19), (19, 20),
+		]
+
 	def drawBoundingBox(self, frame, odResult, num, drawRatioList=[1.0, 1.0]): # for NN
 		resultNum = len(odResult)
 		if resultNum > 0:
@@ -91,6 +109,74 @@ class PostProcessor(QThread):
 
 	def printClass(self, frame, clResult, num, posX, posY):
 		cv2.putText(frame, 'Cluster_{} : {}'.format(num, clResult), (posX, posY), cv2.FONT_HERSHEY_SIMPLEX, 1, self.colorList[num], 2)
+		return frame
+
+	def drawHandPose(self, frame, handsResult, drawRatioList=[1.0, 1.0]):
+		"""
+		Hand Pose 결과를 프레임에 시각화
+		
+		Parameters
+		----------
+		frame        : np.ndarray (BGR 이미지)
+		handsResult  : list – RtpmSendHandResultAsJson() 으로 전송된 JSON의
+		               'hands' 리스트.
+		               각 원소: {'id':int, 'score':float, 'bbox':[x,y,w,h],
+		                         'keypoints':[{'id':int,'x':int,'y':int,'conf':float}...]}
+		drawRatioList: [x_ratio, y_ratio] – 프레임 디스플레이 스케일 보정
+
+		Returns
+		-------
+		frame : 시각화가 완료된 np.ndarray
+		"""
+		if not handsResult:
+			return frame
+
+		for hand in handsResult:
+			try:
+				bbox  = hand.get('bbox', [])
+				score = hand.get('score', 0.0)
+				kpts  = hand.get('keypoints', [])
+
+				# ── BBox 그리기 ─────────────────────────────
+				if len(bbox) == 4:
+					x1 = int(bbox[0] * drawRatioList[0])
+					y1 = int(bbox[1] * drawRatioList[1])
+					x2 = int((bbox[0] + bbox[2]) * drawRatioList[0])
+					y2 = int((bbox[1] + bbox[3]) * drawRatioList[1])
+					cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+					cv2.putText(frame,
+						'hand {:.2f}'.format(score),
+						(x1, max(y1 - 6, 10)),
+						cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+
+				# ── Keypoint 좌표 수집 ───────────────────────
+				KPT_CONF_THRESH = 0.3
+				points = {}  # id → (px, py)
+				for kp in kpts:
+					kid  = kp.get('id', -1)
+					conf = kp.get('conf', 0.0)
+					if conf < KPT_CONF_THRESH:
+						continue
+					px = int(kp.get('x', 0) * drawRatioList[0])
+					py = int(kp.get('y', 0) * drawRatioList[1])
+					points[kid] = (px, py)
+
+				# ── 스켈레톤 연결선 그리기 ───────────────────
+				for (a, b) in self.HAND_SKELETON:
+					if a in points and b in points:
+						cv2.line(frame, points[a], points[b], (255, 165, 0), 2)
+
+				# ── Keypoint 원 그리기 ───────────────────────
+				for kid, (px, py) in points.items():
+					# 손목(0)은 크게, 나머지는 작게
+					radius = 6 if kid == 0 else 4
+					cv2.circle(frame, (px, py), radius, (0, 220, 255), -1)
+					cv2.circle(frame, (px, py), radius, (0, 0, 0), 1)  # 외곽선
+
+			except Exception as e:
+				_, _, tb = sys.exc_info()
+				print(__name__, tb.tb_lineno, e)
+
 		return frame
 
 	def saveResultData(self, fileName, fileDir, imageShape, resultDict):

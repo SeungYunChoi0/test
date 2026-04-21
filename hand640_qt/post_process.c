@@ -1,10 +1,12 @@
 
 /*
     Openedges Enlight Network Compiler
-    Classification main
+    Hand Pose Detection (HPD) post_process.c
+    - custom_postproc_run()에 void *result (custom_hand_t*) 전달
 */
 
 #include "stdint.h"
+#include <string.h>
 #include "enlight_network.h"
 
 #ifdef __i386__
@@ -18,20 +20,45 @@ extern void custom_postproc_init();
 
 extern int custom_postproc_run(
     int num_output,
-    enlight_act_tensor_t**  outputs           /**< output conf tensor number   */
+    enlight_act_tensor_t**  outputs,          /**< output conf tensor number   */
+    void *result                             /**< custom_hand_t* result buffer */
     );
+
+#define HPD_MAX_DET 2
+#define HPD_NUM_KPT 21
+
+typedef struct {
+    float x;
+    float y;
+    float conf;
+} hpd_keypoint_t;
+
+typedef struct {
+    float x1;
+    float y1;
+    float x2;
+    float y2;
+    float score;
+    hpd_keypoint_t kpts[HPD_NUM_KPT];
+} hpd_detection_t;
+
+typedef struct {
+    hpd_detection_t dets[HPD_MAX_DET];
+    int num_det;
+} custom_hand_t;
 
 
 /** @brief Run custom post-processing
  *
- *      Unknonw post-processing
- *      
+ *      Hand Pose Detection (YOLOv8n-pose / hand640_qt)
+ *      reserved → custom_hand_t* : bbox + 21 keypoints per hand
  *
- *  @param net_inst         instance Network instance.
- *  @param output_base      output tensor buffer base
- *  @param reserved 
+ *  @param net_inst         Network instance.
+ *  @param output_base      NPU output tensor buffer base
+ *  @param num_input        (unused)
+ *  @param reserved         Pointer to custom_hand_t filled by custom_postproc_run()
  *
- *  @return Return number of output
+ *  @return Number of output tensors
  */
 int run_post_process(
     void *net_inst,
@@ -49,6 +76,10 @@ int run_post_process(
     inst = (enlight_network_t *)net_inst;
     custom_param = (enlight_custom_postproc_t*)inst->post_proc_extension;
 
+    /* reserved(custom_hand_t*)를 미리 초기화 */
+    if (reserved != NULL)
+        memset(reserved, 0, sizeof(custom_hand_t));
+
     num_output = enlight_custom_get_output_tensors(custom_param, output_tensors);
 
     for (i = 0; i < num_output; i++)
@@ -56,7 +87,8 @@ int run_post_process(
 
     custom_postproc_init();
 
-    result = custom_postproc_run(num_output, output_tensors);
+    /* void *result 로 custom_hand_t* 전달 */
+    result = custom_postproc_run(num_output, output_tensors, reserved);
     post_process_log("custom process result: %d\n", result);
 
     return num_output;

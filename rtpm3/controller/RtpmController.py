@@ -122,7 +122,13 @@ class RtpmController(QThread):
                                 drawRatio = [
                                     frameList[0].shape[1]/self.__frameWidth, frameList[0].shape[0]/self.__frameHeight]
 
-                                if ('cluster1' in resultList) or ('cluster2' in resultList):
+                                # ── Hand Pose 모델 결과 처리 (hand640_qt) ──────────────────
+                                if resultList.get('type') == 'hand_pose':
+                                    frameList[0] = postProcessor.drawHandPose(
+                                        frameList[0], resultList.get('hands', []), drawRatio)
+
+                                # ── 기존 cluster1/cluster2 OD/CL 처리 ──────────────────────
+                                elif ('cluster1' in resultList) or ('cluster2' in resultList):
                                     # Draw result for cluster1
                                     if resultList['cluster1']['type'] == TYPE_CLASSIFICATION:
                                         frameList[0] = postProcessor.printClass(
@@ -138,7 +144,9 @@ class RtpmController(QThread):
                                     else: # TYPE_OBJECTDETECTION
                                         frameList[0] = postProcessor.drawBoundingBox(
                                             frameList[0], resultList['cluster2']['od'], 2, drawRatio)
-                                else:
+
+                                # ── 기존 Falcon OD (distance) 처리 ────────────────────────
+                                elif 'od' in resultList:
                                     # Draw OD
                                     frameList[0] = postProcessor.drawBoundingBoxforDistance(
                                         frameList[0], resultList['od'], drawRatio)

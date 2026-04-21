@@ -1,6 +1,6 @@
 /*
  * custom_postproc.c
- * YOLOv8n-pose Hand Keypoint 후처리 (최종판)
+ * YOLOv8n-pose Hand Keypoint 후처리 (hand640_qt / rtpm3 연동)
  *
  * ┌──────────────────────────────────────────────────────────────────┐
  * │ 전체 흐름                                                         │
@@ -11,10 +11,11 @@
  * │  [3] keypoint 디코딩   → 21개 × (x, y, conf)                     │
  * │    ↓                                                             │
  * │  [4] NMS               → score 내림차순 정렬 → IoU 기반 중복 제거  │
- * │  [5] stdout 출력       → D3-G 브릿지가 파싱                       │
+ * │  [5] void *result(custom_hand_t*) 채우기 → NnRtpm이 JSON 전송    │
+ * │  [6] stdout 로그 출력                                             │
  * └──────────────────────────────────────────────────────────────────┘
  *
- * NPU 출력 텐서 구조 (network.h / oact_entry_table.py 기준 최종 확정):
+ * NPU 출력 텐서 구조 (oact_entry_table.py 기준 최종 확정):
  *   tensor[0] Conv2d_45 (cv4_0): 1×63×80×80  P3 keypoint  stride=8
  *   tensor[1] Conv2d_43 (cv2_0): 1×64×80×80  P3 DFL bbox  stride=8
  *   tensor[2] Conv2d_44 (cv3_0): 1× 1×80×80  P3 cls/obj   stride=8
@@ -79,7 +80,7 @@ static const int SCALE_STRIDE[NUM_SCALES] = { 8, 16, 32};
 
 /* ──────────────────────────────────────────────
  * 텐서 인덱스 매크로
- * network.h / oact_entry_table.py 기준 최종 확정 (640 모델):
+ * oact_entry_table.py 기준 최종 확정 (640 모델):
  *   스케일 s=0(P3), 1(P4), 2(P5) 각각
  *   kpt = s*3+0, bbox = s*3+1, cls = s*3+2
  * ────────────────────────────────────────────── */
@@ -88,7 +89,8 @@ static const int SCALE_STRIDE[NUM_SCALES] = { 8, 16, 32};
 #define TENSOR_CLS(s)   ((s) * 3 + 2)   /* 2, 5, 8 */
 
 /* ──────────────────────────────────────────────
- * 데이터 구조체
+ * 내부 데이터 구조체 (후보 풀용)
+ * NnType.h 의 hpd_keypoint_t / hpd_detection_t 와 동일 레이아웃
  * ────────────────────────────────────────────── */
 typedef struct {
     float x;
@@ -106,6 +108,24 @@ typedef struct {
     hand_detection_t dets[MAX_CANDIDATES];
     int n;
 } candidate_pool_t;
+
+/* post_process.c 에서 정의된 결과 구조체 (NnType.h 와 동일) */
+typedef struct {
+    float x;
+    float y;
+    float conf;
+} hpd_keypoint_t;
+
+typedef struct {
+    float x1, y1, x2, y2;
+    float score;
+    hpd_keypoint_t kpts[NUM_KPT];
+} hpd_detection_t;
+
+typedef struct {
+    hpd_detection_t dets[MAX_DET];
+    int num_det;
+} custom_hand_t;
 
 /* ──────────────────────────────────────────────
  * 수학 유틸
@@ -255,12 +275,27 @@ void custom_postproc_init(void)
 
 /* ──────────────────────────────────────────────
  * 메인 후처리
+ *
+ * @param num_output     텐서 개수 (9개)
+ * @param output_tensors ENLIGHT SDK 텐서 포인터 배열
+ * @param result         custom_hand_t* cast – NnNeuralNetwork.c 에서
+ *                       &pNeuralNetwork->hand_data 로 전달됨
+ *
+ * @return 검출된 손 개수 (0~MAX_DET)
  * ────────────────────────────────────────────── */
 int custom_postproc_run(int num_output,
-                        enlight_act_tensor_t **output_tensors)
+                        enlight_act_tensor_t **output_tensors,
+                        void *result)
 {
     int s, h, w, c, k, i;
-    (void)num_output;  /* ENLIGHT API 요구 시그니처, 내부 미사용 */
+    (void)num_output;  /* ENLIGHT API 요구 시그니처 */
+
+    /* ─────────────────────────────────────────
+     * result 포인터 캐스팅
+     *   NnNeuralNetwork.c: network_run_postprocess(..., &hand_data)
+     *   post_process.c   : custom_postproc_run(..., reserved)
+     * ───────────────────────────────────────── */
+    custom_hand_t *hand_result = (custom_hand_t *)result;
 
     /* static 선언 필수:
      * MAX_CANDIDATES x sizeof(hand_detection_t) 약 54KB
@@ -329,27 +364,43 @@ int custom_postproc_run(int num_output,
     int num_det = nms(&pool, results, MAX_DET);
 
     /* ─────────────────────────────────────────
-     * STEP 4: stdout 출력
-     * 포맷:
-     *   x1 y1 x2 y2 class: 0 score: S
-     *   KPT k x y conf
-     *   ---
+     * STEP 4: 결과를 custom_hand_t 구조체에 기입
+     *   → NnRtpm.c의 RtpmSendHandResultAsJson() 이
+     *     hand_data.num_det / hand_data.dets[]를 읽어 JSON 전송
+     * ───────────────────────────────────────── */
+    if (hand_result != NULL) {
+        hand_result->num_det = num_det;
+        for (i = 0; i < num_det; i++) {
+            hand_result->dets[i].x1    = results[i].x1;
+            hand_result->dets[i].y1    = results[i].y1;
+            hand_result->dets[i].x2    = results[i].x2;
+            hand_result->dets[i].y2    = results[i].y2;
+            hand_result->dets[i].score = results[i].score;
+            for (k = 0; k < NUM_KPT; k++) {
+                hand_result->dets[i].kpts[k].x    = results[i].kpts[k].x;
+                hand_result->dets[i].kpts[k].y    = results[i].kpts[k].y;
+                hand_result->dets[i].kpts[k].conf = results[i].kpts[k].conf;
+            }
+        }
+    }
+
+    /* ─────────────────────────────────────────
+     * STEP 5: stdout 로그 (디버그용)
      * ───────────────────────────────────────── */
     for (i = 0; i < num_det; i++) {
         hand_detection_t *d = &results[i];
         enlight_custom_log(
-            "%.4f %.4f %.4f %.4f class: 0 score: %.4f\n",
-            d->x1, d->y1, d->x2, d->y2, d->score);
+            "[HAND %d] bbox: %.1f %.1f %.1f %.1f score: %.4f\n",
+            i, d->x1, d->y1, d->x2, d->y2, d->score);
         for (k = 0; k < NUM_KPT; k++) {
             enlight_custom_log(
-                "KPT %d %.4f %.4f %.4f\n",
+                "  KPT %d: (%.1f, %.1f) conf=%.4f\n",
                 k, d->kpts[k].x, d->kpts[k].y, d->kpts[k].conf);
         }
-        enlight_custom_log("---\n");
     }
 
     if (num_det == 0)
-        enlight_custom_log("NO_DET\n");
+        enlight_custom_log("[HAND] NO_DET\n");
 
-    return 0;
+    return num_det;
 }
