@@ -829,7 +829,13 @@ class RtpmSocketReader(QThread):
                             
                         kpt_match = self.kpt_pattern.search(line)
                         if kpt_match and current_hand is not None:
-                            current_hand["keypoints"].append([float(kpt_match.group(1)), float(kpt_match.group(2)), float(kpt_match.group(3))])
+                            idx = len(current_hand["keypoints"])
+                            current_hand["keypoints"].append({
+                                'id': idx,
+                                'x': float(kpt_match.group(1)),
+                                'y': float(kpt_match.group(2)),
+                                'conf': float(kpt_match.group(3))
+                            })
                             if len(current_hand["keypoints"]) == 21:
                                 current_result["hands"].append(current_hand)
                                 self.parent._RtpmController__lastResult = current_result.copy()
