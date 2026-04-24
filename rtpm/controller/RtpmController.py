@@ -66,8 +66,8 @@ class RtpmController(QThread):
         self.__updater = RtpmDataUpdater(parent)
         self.__recorder = RtpmVideoRecorder(parent)
         self.__imageSaver = RtpmImageSaver(parent)
-        self.__sshModeActive = True
-        self.__sshReader = RtpmSshReader(self)
+        self.__socketModeActive = True
+        self.__socketReader = RtpmSocketReader(self)
 
         self.__monitoringStatus = False
         self.__controlStatus = False
@@ -121,7 +121,7 @@ class RtpmController(QThread):
                 # ── 웹캠 모드(inputMode=3): 화면 항상 표시 + 결과 오버레이 ───────
                 if self.__inputMode == 3:
                     # (1) 새 결과가 있으면 저장 (단, SSH 전용 모드일 경우 기존 소켓 결과는 무시)
-                    if resultList is not None and not getattr(self, '_RtpmController__sshModeActive', False):
+                    if resultList is not None and not getattr(self, '_RtpmController__socketModeActive', False):
                         print('[DEBUG] hand_pose result received:', resultList.get('type'),
                               'num_hands:', len(resultList.get('hands', [])))
                         self.__lastResult = resultList
@@ -345,17 +345,17 @@ class RtpmController(QThread):
                 if self.__mode:
                     self.__reader.startRead(
                         filePath, self.__frameList, self.__frameListMax, inputMode)
-                    if self.__inputMode == 3 and getattr(self, '_RtpmController__sshModeActive', False):
+                    if self.__inputMode == 3 and getattr(self, '_RtpmController__socketModeActive', False):
                         print('[INFO] Starting SSH Background Thread...')
-                        self.__sshReader.startRead()
+                        self.__socketReader.startRead()
                 else:
                     self.__mode = False
         else:
             if self.__monitoringStatus is True:
                 if self.__mode is True:
                     self.__reader.stopRead()
-                    if hasattr(self, '_RtpmController__sshReader'):
-                        self.__sshReader.stopRead()
+                    if hasattr(self, '_RtpmController__socketReader'):
+                        self.__socketReader.stopRead()
                 else:
                     self.__controlStatus = True
 
@@ -755,70 +755,99 @@ class RtpmFileReader(QThread):
     def stopRead(self):
         self.__status = False
 
-class RtpmSshReader(QThread):
+
+class RtpmSocketReader(QThread):
     def __init__(self, parent):
-        super(RtpmSshReader, self).__init__(parent)
+        super(RtpmSocketReader, self).__init__(parent)
         self.parent = parent
         self.__status = False
         import re
         self.hand_pattern = re.compile(r"\[HAND \d+\] bbox:\s*([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)\s+score:\s*([\d\.]+)")
         self.kpt_pattern = re.compile(r"KPT \d+:\s*\(([\d\.]+),\s*([\d\.]+)\)\s*conf=([\d\.]+)")
         self.no_det_pattern = re.compile(r"\[HAND\] NO_DET")
-        self.__process = None
+        self.server_socket = None
+        self.client_socket = None
 
     def run(self):
-        import subprocess
-        print("[SSH Reader] 스레드 시작 - 보드에 접속하여 명령어를 수행합니다.")
-        # 보드 IP와 명령어 (user requested values)
-        cmd = ['ssh', 'root@192.168.0.100', 'tcnnapp -i rtpm -o rtpm -n hand640_qt']
+        import socket
+        HOST = '0.0.0.0'
+        PORT = 8888
+        print(f"[Socket Reader] 포트 {PORT}에서 보드의 Netcat 연결을 대기합니다...")
         
         try:
-            self.__process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket.bind((HOST, PORT))
+            self.server_socket.listen(1)
+            self.server_socket.settimeout(2.0)
+            
+            while self.__status:
+                try:
+                    self.client_socket, addr = self.server_socket.accept()
+                    print(f"[Socket Reader] 보드({addr})가 연결되었습니다! 실시간 수신 시작")
+                    break
+                except socket.timeout:
+                    continue
+            
+            if not self.__status:
+                return
+                
             current_result = {"type": "hand_pose", "hands": []}
             current_hand = None
+            buffer = ""
             
-            for line in iter(self.__process.stdout.readline, ''):
-                if not self.__status:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
+            while self.__status:
+                try:
+                    self.client_socket.settimeout(1.0)
+                    data = self.client_socket.recv(4096)
+                    if not data:
+                        break
                     
-                if self.no_det_pattern.search(line):
-                    current_result["hands"] = []
-                    # RtpmController의 내부 변수에 직접 결과 세팅
-                    self.parent._RtpmController__lastResult = current_result.copy()
-                    continue
+                    chunk = data.decode('utf-8', errors='replace')
+                    buffer += chunk
                     
-                hand_match = self.hand_pattern.search(line)
-                if hand_match:
-                    if current_hand is not None:
-                        current_result["hands"].append(current_hand)
-                    current_hand = {
-                        "bbox": [float(hand_match.group(1)), float(hand_match.group(2)), 
-                                 float(hand_match.group(3)), float(hand_match.group(4))],
-                        "score": float(hand_match.group(5)),
-                        "keypoints": []
-                    }
-                    continue
-                    
-                kpt_match = self.kpt_pattern.search(line)
-                if kpt_match and current_hand is not None:
-                    current_hand["keypoints"].append([float(kpt_match.group(1)), float(kpt_match.group(2)), float(kpt_match.group(3))])
-                    if len(current_hand["keypoints"]) == 21:
-                        current_result["hands"].append(current_hand)
-                        # 파싱 완성된 손 데이터를 RtpmController로 즉시 전송
-                        self.parent._RtpmController__lastResult = current_result.copy()
+                    while '\n' in buffer:
+                        line, buffer = buffer.split('\n', 1)
+                        line = line.strip()
                         
-                        current_result["hands"] = []
-                        current_hand = None
+                        if self.no_det_pattern.search(line):
+                            current_result["hands"] = []
+                            self.parent._RtpmController__lastResult = current_result.copy()
+                            continue
+                            
+                        hand_match = self.hand_pattern.search(line)
+                        if hand_match:
+                            if current_hand is not None:
+                                current_result["hands"].append(current_hand)
+                            current_hand = {
+                                "bbox": [float(hand_match.group(1)), float(hand_match.group(2)), 
+                                         float(hand_match.group(3)), float(hand_match.group(4))],
+                                "score": float(hand_match.group(5)),
+                                "keypoints": []
+                            }
+                            continue
+                            
+                        kpt_match = self.kpt_pattern.search(line)
+                        if kpt_match and current_hand is not None:
+                            current_hand["keypoints"].append([float(kpt_match.group(1)), float(kpt_match.group(2)), float(kpt_match.group(3))])
+                            if len(current_hand["keypoints"]) == 21:
+                                current_result["hands"].append(current_hand)
+                                self.parent._RtpmController__lastResult = current_result.copy()
+                                current_result["hands"] = []
+                                current_hand = None
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    print("[Socket Reader] recv error:", e)
+                    break
         except Exception as e:
-            print("[SSH Reader] 에러 발생:", e)
+            print("[Socket Reader] 에러 발생:", e)
         finally:
-            if self.__process:
-                self.__process.terminate()
-                self.__process.wait()
-            print("[SSH Reader] 서브프로세스 종료됨.")
+            if self.client_socket:
+                self.client_socket.close()
+            if self.server_socket:
+                self.server_socket.close()
+            print("[Socket Reader] 소켓 종료됨.")
 
     def startRead(self):
         self.__status = True
@@ -826,7 +855,4 @@ class RtpmSshReader(QThread):
 
     def stopRead(self):
         self.__status = False
-        if self.__process:
-            self.__process.terminate()
-            self.__process = None
         self.wait()
