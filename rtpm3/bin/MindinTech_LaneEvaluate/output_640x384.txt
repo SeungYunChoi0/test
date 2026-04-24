@@ -1,6 +1,0 @@
-file: ./output.txt
-tp: 78600 fp: 19862 fn: 26286
-precision: 0.798278
-recall: 0.749385
-Fmeasure: 0.773059
-
