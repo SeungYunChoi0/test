@@ -71,6 +71,7 @@ class RtpmController(QThread):
         self.__controlStatus = False
         self.__fileSaveStatus = False
         self.__mode = False
+        self.__inputMode = 0      # 0:camera(EVB) 1:file 2:folder 3:webcam
         self.__frameList = list()
         # self.__frameListMax = 1
         self.__frameListMax = 5
@@ -78,6 +79,8 @@ class RtpmController(QThread):
         self.__windowHeight = 1080
         self.__saveFrameList = list()
         self.__captureFrame = False
+        self.__lastFrame = None   # 웹캠 모드: 가장 최근 캡처 프레임 보관
+        self.__lastResult = None  # 웹캠 모드: 가장 최근 추론 결과 보관
 
         self.__initSlots()
         self.__clearVariables()
@@ -109,10 +112,58 @@ class RtpmController(QThread):
 
         while self.__monitoringStatus:
             # How to receive frame by mode
-            if self.__mode:  # read file
+            if self.__mode:  # read file or webcam
                 # List > [0 : SyncStamp][1 : Result total by detection type][2 : Result data by detection type]
                 resultList = visionProtocol.getDetectionResult()
-                if resultList is not None:
+
+                # ── 웹캠 모드(inputMode=3): 화면 항상 표시 + 결과 오버레이 ───────
+                if self.__inputMode == 3:
+                    # (1) 새 결과가 있으면 저장
+                    if resultList is not None:
+                        print('[DEBUG] hand_pose result received:', resultList.get('type'),
+                              'num_hands:', len(resultList.get('hands', [])))
+                        self.__lastResult = resultList
+
+                    # (2) 프레임 큐에서 최신 프레임 가져오기
+                    if len(self.__frameList) > 0:
+                        frameList = self.__frameList[-1]   # 가장 최신 프레임
+                        self.__frameList.clear()           # 오래된 프레임 제거
+                        try:
+                            frame = frameList[0].copy()
+                            drawRatio = [
+                                frame.shape[1] / self.__frameWidth,
+                                frame.shape[0] / self.__frameHeight]
+
+                            # 가장 최근 결과로 오버레이
+                            if self.__lastResult is not None:
+                                rType = self.__lastResult.get('type')
+                                if rType == 'hand_pose':
+                                    frame = postProcessor.drawHandPose(
+                                        frame, self.__lastResult.get('hands', []), drawRatio)
+                                elif ('cluster1' in self.__lastResult) or ('cluster2' in self.__lastResult):
+                                    if self.__lastResult['cluster1']['type'] == TYPE_CLASSIFICATION:
+                                        frame = postProcessor.printClass(
+                                            frame, self.__lastResult['cluster1']['cl'], 1, 50, 50)
+                                    else:
+                                        frame = postProcessor.drawBoundingBox(
+                                            frame, self.__lastResult['cluster1']['od'], 1, drawRatio)
+                                    if self.__lastResult['cluster2']['type'] == TYPE_CLASSIFICATION:
+                                        frame = postProcessor.printClass(
+                                            frame, self.__lastResult['cluster2']['cl'], 2, 50, 100)
+                                    else:
+                                        frame = postProcessor.drawBoundingBox(
+                                            frame, self.__lastResult['cluster2']['od'], 2, drawRatio)
+                                elif 'od' in self.__lastResult:
+                                    frame = postProcessor.drawBoundingBoxforDistance(
+                                        frame, self.__lastResult['od'], drawRatio)
+
+                            rtpmMainWidget.updateImageSignal.emit([frame])
+                        except Exception as e:
+                            _, _, tb = sys.exc_info()
+                            print(__name__, tb.tb_lineno, e)
+
+                # ── 파일/폴더 모드(inputMode=1,2): syncStamp 매칭 ─────────────
+                elif resultList is not None:
                     try:
                         while True:
                             frameList = self.__frameList.pop(0)
@@ -238,6 +289,8 @@ class RtpmController(QThread):
                 self.__controlStatus = False
                 self.__fileSaveStatus = savingMode
                 self.__mode = True if inputMode > 0 else False
+                self.__inputMode = inputMode   # 0:camera(EVB) 1:file 2:folder 3:webcam
+                self.__lastResult = None       # 웹캠 모드 결과 초기화
 
                 # initialize model
                 stream_width = self.__frameWidth if self.__mode else self.__projframeWidth
